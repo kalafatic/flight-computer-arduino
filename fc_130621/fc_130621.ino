@@ -5,27 +5,35 @@
 #include <SoftwareSerial.h>
 #include <SimpleKalmanFilter.h>
 
-#define DISPLAY_RST 2
-#define DISPLAY_CE 3
-#define DISPLAY_DC 4
-#define DISPLAY_DIN 5
-#define DISPLAY_CLK 6
+const int DISPLAY_RST_PIN = 2;
+const int DISPLAY_CE_PIN = 3;
+const int DISPLAY_DC_PIN = 4;
+const int DISPLAY_DIN_PIN = 5;
+const int DISPLAY_CLK_PIN = 6;
 
-#define SOUND 7
-#define LED_SOUND 8
-#define LED_BLUETOOTH 9
+const int SOUND_PIN = 7;
+const int LED_SOUND_PIN = 8;
+const int LED_BLUETOOTH_PIN = 9;
 
 /*  Arduino Nano Pin "D10" -> HC-06 Pin "RX"
  *  Arduino Nano Pin "D11" -> HC-06 Pin "TX"
  */
-#define BLUETOOTH_RX 10 // digital 10 (Nano clone)
-#define BLUETOOTH_TX 11 // digital 11 (Nano clone)
+const int BLUETOOTH_RX_PIN = 10; // digital 10 (Nano clone)
+const int BLUETOOTH_TX_PIN = 11; // digital 11 (Nano clone)
+
+const int VARIO_BT_DELAY_MS = 24;
+
+const long BLUETOOTH_SERIAL_SPEED = 9600;
+const long COMPUTER_SERIAL_SPEED = 9600;
+
+const int TONE_FREQUENCY_HZ = 500;
+const int TONE_DURATION_MS = 50;
 
 // inicializace Bluetooth modul SoftwareSerial
-SoftwareSerial bluetooth(BLUETOOTH_TX, BLUETOOTH_RX);
+SoftwareSerial bluetooth(BLUETOOTH_TX_PIN, BLUETOOTH_RX_PIN);
 
-Nokia_5110 lcd = Nokia_5110( DISPLAY_RST, DISPLAY_CE, DISPLAY_DC, DISPLAY_DIN,
-		DISPLAY_CLK);
+Nokia_5110 lcd = Nokia_5110(DISPLAY_RST_PIN, DISPLAY_CE_PIN, DISPLAY_DC_PIN,
+		DISPLAY_DIN_PIN, DISPLAY_CLK_PIN);
 
 /*  Arduino Nano Pin "A5" -> MS5611 Pin "SCL"
  *  Arduino Nano Pin "A4" -> MS5611 Pin "SDA"
@@ -38,8 +46,6 @@ double pressure;
 double temperature;
 double altitude;
 
-int VARIO_BT_DELAY = 24;
-
 /*
  SimpleKalmanFilter(e_mea, e_est, q);
  e_mea: Measurement Uncertainty
@@ -50,19 +56,20 @@ SimpleKalmanFilter pressureKalmanFilter(1, 1, 0.01);
 long refresh_time;
 
 void initBluetooth() {
-	bluetooth.begin(9600);
+	bluetooth.begin(BLUETOOTH_SERIAL_SPEED);
 
 	Serial.println("Bluetooth ON");
-	digitalWrite(LED_BLUETOOTH, HIGH);
+	digitalWrite(LED_BLUETOOTH_PIN, HIGH);
 }
 
 void initMS5611() {
 	Serial.println("Initialize MS5611 Sensor");
 
-	while (!ms5611.begin(MS5611_ULTRA_HIGH_RES)) {
+	while (!ms5611.begin()) {
 		Serial.println("Could not find a valid MS5611 sensor, check wiring!");
-		delay(VARIO_BT_DELAY);
+		delay(VARIO_BT_DELAY_MS);
 	}
+	ms5611.setOversampling(OSR_ULTRA_HIGH);
 	Serial.println("MS5611 Sensor Initialized");
 
 	// Check settings
@@ -92,10 +99,10 @@ void checkSettings() {
 
 // The setup function is called once at startup of the sketch
 void setup() {
-	pinMode(LED_SOUND, OUTPUT);
-	pinMode(LED_BLUETOOTH, OUTPUT);
+	pinMode(LED_SOUND_PIN, OUTPUT);
+	pinMode(LED_BLUETOOTH_PIN, OUTPUT);
 
-	Serial.begin(9600);
+	Serial.begin(COMPUTER_SERIAL_SPEED);
 
 	initLCD();
 
@@ -105,18 +112,15 @@ void setup() {
 	initMS5611();
 }
 
-// The loop function is called in an endless loop
-void loop() {
-	receiveBT();
+void readSensorData() {
+	ms5611.read();
+	pressure = ms5611.getPressure();
+	temperature = ms5611.getTemperature();
+	altitude = ms5611.getAltitude(pressure);
+}
 
+void updateDisplay() {
 	lcd.clear();
-
-	delay(VARIO_BT_DELAY);
-
-	sendBT();
-	digitalWrite(LED_SOUND, HIGH);
-
-	delay(VARIO_BT_DELAY);
 
 	lcd.print("PRS: ");
 	lcd.print(pressure);
@@ -128,8 +132,25 @@ void loop() {
 	lcd.setCursor(0, 4);
 	lcd.print("ALT: ");
 	lcd.println(altitude);
+}
 
-	tone(SOUND, 500, 50);
+void handleVario() {
+	digitalWrite(LED_SOUND_PIN, HIGH);
+	tone(SOUND_PIN, TONE_FREQUENCY_HZ, TONE_DURATION_MS);
+}
+
+// The loop function is called in an endless loop
+void loop() {
+	receiveBT();
+	readSensorData();
+
+	delay(VARIO_BT_DELAY_MS);
+
+	sendBT();
+	updateDisplay();
+	handleVario();
+
+	delay(VARIO_BT_DELAY_MS);
 
 	float estimated_altitude = pressureKalmanFilter.updateEstimate(altitude);
 
@@ -139,10 +160,12 @@ void loop() {
 		Serial.print(", estimated_altitude-");
 		Serial.print(estimated_altitude, 6);
 		Serial.println();
-		refresh_time = millis() + VARIO_BT_DELAY;
+		refresh_time = millis() + VARIO_BT_DELAY_MS;
 	}
 
 	print();
+
+	digitalWrite(LED_SOUND_PIN, LOW);
 }
 
 void receiveBT() {
@@ -170,23 +193,26 @@ void receiveBT() {
 }
 
 void sendBT() {
-	pressure = ms5611.readPressure();
-	temperature = ms5611.readTemperature();
-	altitude = ms5611.getAltitude(pressure);
+	// The custom Bluetooth protocol sends data in the following format:
+	// _<ID> <VALUE_HEX>\n
+	// where <ID> is a 3-letter identifier (PRS, TMP, ALT)
+	// and <VALUE_HEX> is the rounded integer value in hexadecimal format.
 
-	// xtrack protocol
+	// Send pressure data (xtrack protocol)
 	bluetooth.print("_PRS ");
-	bluetooth.print((long int) (pressure + 0.5), HEX);
+	bluetooth.print((long int) round(pressure), HEX);
 	bluetooth.print("\n");
 
-	// FC protocol
+	// Send temperature data (FC protocol)
 	bluetooth.print("_TMP ");
-	bluetooth.print((long int) (temperature + 0.5), HEX);
+	bluetooth.print((long int) round(temperature), HEX);
 	bluetooth.print("\n");
-	// FC protocol
+
+	// Send altitude data (FC protocol)
 	bluetooth.print("_ALT ");
-	bluetooth.print((long int) (altitude + 0.5), HEX);
+	bluetooth.print((long int) round(altitude), HEX);
 	bluetooth.print("\n");
+
 	bluetooth.flush();
 }
 
@@ -197,7 +223,7 @@ void print() {
 	Serial.print(pressure);
 
 	Serial.print(", pressure HEX = ");
-	Serial.print((long int) (pressure + 0.5), HEX);
+	Serial.print((long int) round(pressure), HEX);
 
 	Serial.print(", altitude = ");
 	Serial.print(altitude, 2);
